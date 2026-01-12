@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+websockets
+google-auth
+google-cloud-aiplatform
+python-dotenv
+pydantic

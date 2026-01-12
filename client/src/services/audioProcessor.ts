@@ -9,7 +9,7 @@ export class AudioProcessor {
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private silenceThreshold: number = 0.02; // Increased threshold to reduce noise triggering
-  private silenceDuration: number = 1500; // 1.5 seconds of silence triggers end-of-turn
+  private silenceDuration: number = 2500; // 2.5 seconds of silence triggers end-of-turn (updated from 1.5s)
   private lastSoundTime: number = Date.now();
   private isSpeaking: boolean = false;
   private silenceCheckInterval: NodeJS.Timeout | null = null;
@@ -20,16 +20,33 @@ export class AudioProcessor {
   private consecutiveSilenceFrames: number = 0; // Counter for consecutive silence frames
   private minSilenceFrames: number = 3; // Require 3 consecutive frames to confirm silence
 
+  // Noise Reduction properties
+  private noiseReductionEnabled: boolean = true; // Enabled by default
+  private noiseReductionStrength: number = 0.7; // 70% reduction by default
+  private noiseProfile: Float32Array | null = null; // Average noise amplitude profile
+  private calibrationSamples: Float32Array[] = []; // Temporary storage for calibration
+  private readonly NOISE_PROFILE_FRAMES = 10; // Calibrate over 10 frames (~640ms)
+  private isCalibrated: boolean = false;
+  private frameCount: number = 0;
+
   async startCapture(onAudioData: (chunk: Uint8Array) => void, onSilence?: () => void): Promise<MediaStream> {
     try {
       // Reset counters
       this.consecutiveSoundFrames = 0;
       this.consecutiveSilenceFrames = 0;
       this.isSpeaking = false;
+      this.frameCount = 0;
+      this.isCalibrated = false;
+      this.calibrationSamples = [];
 
       // Store silence callback
       this.onSilenceDetected = onSilence || null;
       this.lastSoundTime = Date.now();
+
+      console.log('🎙️ Starting audio capture with noise reduction');
+      console.log(`   Noise reduction: ${this.noiseReductionEnabled ? 'ENABLED' : 'DISABLED'}`);
+      console.log(`   Reduction strength: ${(this.noiseReductionStrength * 100).toFixed(0)}%`);
+      console.log(`   Calibration frames: ${this.NOISE_PROFILE_FRAMES} (~${(this.NOISE_PROFILE_FRAMES * 256).toFixed(0)}ms)`);
 
       // Request microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -52,13 +69,40 @@ export class AudioProcessor {
 
       this.processor.onaudioprocess = (event) => {
         const inputData = event.inputBuffer.getChannelData(0);
+        this.frameCount++;
 
+        // === PHASE 1: Noise Calibration (First N frames) ===
+        if (!this.isCalibrated && this.noiseReductionEnabled) {
+          if (this.calibrationSamples.length < this.NOISE_PROFILE_FRAMES) {
+            // Store copy of frame for calibration
+            const frameCopy = new Float32Array(inputData);
+            this.calibrationSamples.push(frameCopy);
+
+            if (this.calibrationSamples.length === 1) {
+              console.log('🔇 Noise calibration started... (stay quiet for optimal results)');
+            }
+
+            if (this.calibrationSamples.length === this.NOISE_PROFILE_FRAMES) {
+              this.buildNoiseProfile();
+              console.log(`🔇 Noise profile calibrated from ${this.NOISE_PROFILE_FRAMES} frames`);
+              console.log(`   Average noise level: ${this.calculateRMS(this.noiseProfile!).toFixed(6)}`);
+            }
+          }
+        }
+
+        // === PHASE 2: Apply Noise Reduction ===
+        let processedData = inputData;
+        if (this.isCalibrated && this.noiseReductionEnabled && this.noiseProfile) {
+          processedData = this.applyNoiseReduction(inputData);
+        }
+
+        // === PHASE 3: Voice Activity Detection ===
         // Calculate RMS (Root Mean Square) amplitude - more accurate than max amplitude
         let sumSquares = 0;
-        for (let i = 0; i < inputData.length; i++) {
-          sumSquares += inputData[i] * inputData[i];
+        for (let i = 0; i < processedData.length; i++) {
+          sumSquares += processedData[i] * processedData[i];
         }
-        const rmsAmplitude = Math.sqrt(sumSquares / inputData.length);
+        const rmsAmplitude = Math.sqrt(sumSquares / processedData.length);
 
         // Voice Activity Detection with noise gating
         // Use RMS amplitude and require consecutive frames to confirm speech/silence
@@ -90,11 +134,12 @@ export class AudioProcessor {
           }
         }
 
-        // Convert Float32Array to Int16Array (PCM16)
-        const pcm16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
+        // === PHASE 4: PCM16 Conversion ===
+        // Convert Float32Array to Int16Array (PCM16) using processed data
+        const pcm16 = new Int16Array(processedData.length);
+        for (let i = 0; i < processedData.length; i++) {
           // Clamp to [-1, 1] range
-          const s = Math.max(-1, Math.min(1, inputData[i]));
+          const s = Math.max(-1, Math.min(1, processedData[i]));
           // Convert to 16-bit PCM
           pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
@@ -110,12 +155,116 @@ export class AudioProcessor {
       // Start silence detection interval
       this.startSilenceDetection();
 
-      console.log('Audio capture started (16kHz mono PCM16) with auto silence detection');
+      console.log('✅ Audio capture started (16kHz mono PCM16)');
+      console.log('   - Noise reduction: ENABLED (70% strength)');
+      console.log('   - Automatic silence detection: 2.5s');
+      console.log('   - Voice activity detection: ENABLED');
       return this.mediaStream;
     } catch (error) {
       console.error('Error starting audio capture:', error);
       throw error;
     }
+  }
+
+  /**
+   * Build noise profile from calibration samples
+   * Uses spectral averaging to create a baseline noise model
+   */
+  private buildNoiseProfile(): void {
+    if (this.calibrationSamples.length === 0) return;
+
+    const sampleLength = this.calibrationSamples[0].length;
+    this.noiseProfile = new Float32Array(sampleLength);
+
+    // Calculate average amplitude for each sample position
+    for (let i = 0; i < sampleLength; i++) {
+      let sum = 0;
+      for (const sample of this.calibrationSamples) {
+        sum += Math.abs(sample[i]); // Use absolute amplitude
+      }
+      this.noiseProfile[i] = sum / this.calibrationSamples.length;
+    }
+
+    // Update noise floor based on calibrated profile
+    const avgNoiseLevel = this.calculateRMS(this.noiseProfile);
+    this.noiseFloor = avgNoiseLevel * 1.5; // 1.5x average for safety margin
+
+    this.isCalibrated = true;
+
+    // Clear calibration samples to free memory
+    this.calibrationSamples = [];
+
+    console.log(`🎯 Noise floor updated: ${this.noiseFloor.toFixed(6)}`);
+  }
+
+  /**
+   * Apply noise reduction using spectral subtraction and noise gating
+   * @param inputData Raw audio samples
+   * @returns Processed audio samples with noise reduced
+   */
+  private applyNoiseReduction(inputData: Float32Array): Float32Array {
+    if (!this.noiseProfile) return inputData;
+
+    const output = new Float32Array(inputData.length);
+    const strength = this.noiseReductionStrength;
+
+    for (let i = 0; i < inputData.length; i++) {
+      const noisyAmplitude = Math.abs(inputData[i]);
+      const noiseLevel = this.noiseProfile[i];
+
+      // Spectral Subtraction: Subtract noise estimate from signal
+      const cleanAmplitude = Math.max(0, noisyAmplitude - noiseLevel * strength);
+
+      // Noise Gating: Zero out samples below noise floor
+      const gatedAmplitude = cleanAmplitude > this.noiseFloor ? cleanAmplitude : 0;
+
+      // Preserve original phase (sign)
+      output[i] = inputData[i] >= 0 ? gatedAmplitude : -gatedAmplitude;
+    }
+
+    return output;
+  }
+
+  /**
+   * Calculate RMS (Root Mean Square) amplitude
+   * @param data Audio samples
+   * @returns RMS value
+   */
+  private calculateRMS(data: Float32Array): number {
+    let sumSquares = 0;
+    for (let i = 0; i < data.length; i++) {
+      sumSquares += data[i] * data[i];
+    }
+    return Math.sqrt(sumSquares / data.length);
+  }
+
+  /**
+   * Recalibrate noise profile (useful if environment changes)
+   */
+  public recalibrateNoise(): void {
+    console.log('🔄 Recalibrating noise profile...');
+    this.isCalibrated = false;
+    this.calibrationSamples = [];
+    this.noiseProfile = null;
+    this.frameCount = 0;
+  }
+
+  /**
+   * Enable or disable noise reduction
+   * @param enabled Whether to enable noise reduction
+   */
+  public setNoiseReduction(enabled: boolean): void {
+    this.noiseReductionEnabled = enabled;
+    console.log(`🔊 Noise reduction: ${enabled ? 'ENABLED' : 'DISABLED'}`);
+  }
+
+  /**
+   * Set noise reduction strength
+   * @param strength Value between 0 (no reduction) and 1 (maximum reduction)
+   */
+  public setNoiseReductionStrength(strength: number): void {
+    this.noiseReductionStrength = Math.max(0, Math.min(1, strength));
+    console.log(`🎚️ Noise reduction strength: ${(this.noiseReductionStrength * 100).toFixed(0)}%`);
   }
 
   private startSilenceDetection(): void {

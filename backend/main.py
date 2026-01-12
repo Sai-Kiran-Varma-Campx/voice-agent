@@ -162,17 +162,37 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         logger.info(f"[{session_id}] New WebSocket connection")
 
+        # Accept the WebSocket connection first
+        await websocket.accept()
+        logger.info(f"[{session_id}] WebSocket accepted")
+
         # Create WebSocket session
         session = WebSocketSession(session_id, error_tracker)
         sessions[session_id] = session
 
         error_tracker.track_connection_start(session_id)
 
-        # Connect to frontend and Gemini
-        await session.connect(websocket, GCP_PROJECT_ID, GCP_REGION, GEMINI_MODEL)
+        # Connect to Gemini (this might fail if credentials are wrong)
+        try:
+            await session.connect_to_gemini(websocket, GCP_PROJECT_ID, GCP_REGION, GEMINI_MODEL)
+        except Exception as gemini_error:
+            error_msg = str(gemini_error)
+            logger.error(f"[{session_id}] Failed to connect to Gemini: {error_msg}")
+
+            # Send error message to frontend before closing
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Failed to connect to Gemini: {error_msg}",
+                "details": "Check backend logs for more details. Ensure GCP credentials are configured correctly."
+            })
+
+            # Give frontend time to receive the error
+            await asyncio.sleep(0.1)
+            raise
 
         # Send session ID to frontend
         await websocket.send_json({"type": "session_id", "session_id": session_id})
+        logger.info(f"[{session_id}] Session ID sent to frontend")
 
         # Keep the connection alive until closed
         while True:

@@ -25,15 +25,14 @@ class WebSocketSession:
         self.receive_task: Optional[asyncio.Task] = None
         self.gemini_receive_task: Optional[asyncio.Task] = None
 
-    async def connect(self, websocket: WebSocket, project_id: str, region: str, model: str):
+    async def connect_to_gemini(self, websocket: WebSocket, project_id: str, region: str, model: str):
         """
-        Accept WebSocket connection and connect to Gemini Live API
+        Connect to Gemini Live API (WebSocket is already accepted)
         """
         try:
-            # Accept WebSocket connection
-            await websocket.accept()
+            # Store WebSocket reference
             self.websocket = websocket
-            logger.info(f"[{self.session_id}] WebSocket connection accepted")
+            logger.info(f"[{self.session_id}] Connecting to Gemini Live API...")
 
             # Create Gemini session
             self.gemini_session = GeminiLiveSession(project_id, region, model, self.session_id)

@@ -1,6 +1,5 @@
 # Vertex AI credentials
 service-account-key.json
-*.json
 
 # Environment variables
 .env

@@ -1,5 +1,6 @@
 # Vertex AI credentials
 service-account-key.json
+reference-flux-483913-i6.json
 
 # Environment variables
 .env

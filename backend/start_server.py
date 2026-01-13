@@ -4,7 +4,9 @@ Startup script for the backend server
 """
 import uvicorn
 
-if __name__ == "__main__":
+
+def main():
+    """Entry point for uv run start"""
     uvicorn.run(
         "main:app",
         host="127.0.0.1",
@@ -12,3 +14,7 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+
+
+if __name__ == "__main__":
+    main()

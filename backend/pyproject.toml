@@ -13,6 +13,9 @@ dependencies = [
     "pydantic>=2.0.0"
 ]
 
+[project.scripts]
+start = "start_server:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
